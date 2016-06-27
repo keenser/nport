@@ -1,0 +1,8 @@
+if [ "$1" = "purge" ] ; then
+	if [ -n "`grep BB-W1 /etc/default/capemgr`" ] ; then
+		sed -i -e "s:, BB-W1::g" /etc/default/capemgr
+	fi
+fi
+
+systemctl daemon-reload
+udevadm control --reload-rules

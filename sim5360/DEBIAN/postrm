@@ -1,0 +1,4 @@
+if [ "$1" = "purge" ] ; then
+        systemctl disable sim5360.timer
+	systemctl disable sim5360_shutdown.service
+fi

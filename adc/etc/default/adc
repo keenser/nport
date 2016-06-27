@@ -1,0 +1,2 @@
+#OPTIONS="-vv -s --compare '> 0.9' --script /tmp/script.sh"
+OPTIONS="-vv -s"

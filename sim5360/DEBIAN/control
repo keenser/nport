@@ -1,0 +1,8 @@
+Package: sim5360
+Version: 1.1-1
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python
+Maintainer: German Skalaukhov <keenser.sg@gmail.com>
+Description: power on sim5360 modem on startup

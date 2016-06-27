@@ -1,0 +1,12 @@
+[Unit]
+Description=shutdown device on power failue
+
+[Service]
+Type=forking
+Restart=on-failure
+PIDFile=/var/run/powerwatch.pid
+EnvironmentFile=-/etc/default/powerwatch
+ExecStart=/usr/bin/powerwatch -p $OPTIONS
+
+[Install]
+WantedBy=multi-user.target

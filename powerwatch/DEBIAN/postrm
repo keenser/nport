@@ -1,0 +1,3 @@
+if [ "$1" = "purge" ] ; then
+        systemctl disable powerwatch.service
+fi

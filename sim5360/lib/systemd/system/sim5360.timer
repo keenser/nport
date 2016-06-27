@@ -1,0 +1,9 @@
+[Unit]
+Description=start sim5360 after boot
+
+[Timer]
+OnBootSec=10
+Unit=sim5360.service
+
+[Install]
+WantedBy=multi-user.target

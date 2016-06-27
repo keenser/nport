@@ -1,0 +1,8 @@
+Package: powerwatch
+Version: 1.1-0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python
+Maintainer: German Skalaukhov <keenser.sg@gmail.com>
+Description: shutdown device on power failue

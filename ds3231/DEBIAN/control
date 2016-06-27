@@ -1,0 +1,8 @@
+Package: ds3231
+Version: 1.0-0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: udev
+Maintainer: German Skalaukhov <keenser.sg@gmail.com>
+Description: ds3231 configuration

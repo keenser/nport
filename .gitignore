@@ -1,0 +1,5 @@
+deb/usr/*
+nport/*/*.pyc
+nport/*.pyc
+nport/*.so
+main.bin

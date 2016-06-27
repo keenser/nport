@@ -1,0 +1,7 @@
+[Unit]
+Description=w1 bus remove hook
+
+[Service]
+Type=simple
+PIDFile=/var/run/w1_bus_remove_hook.pid
+ExecStart=/usr/bin/w1_bus_remove_hook -vv -s -p

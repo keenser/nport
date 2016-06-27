@@ -1,0 +1,11 @@
+if [ -z "`grep BB-W1 /etc/default/capemgr`" ] ; then
+	sed -i -e 's:#CAPE:CAPE:g' /etc/default/capemgr
+	. /etc/default/capemgr
+	sed -i -e "s:CAPE=.*:CAPE=\"$CAPE, BB-W1\":g" /etc/default/capemgr
+fi
+systemctl daemon-reload
+udevadm control --reload-rules
+
+if [ -z "`grep BB-W1 /sys/devices/bone_capemgr.*/slots`" ] ; then
+	echo BB-W1 | tee /sys/devices/bone_capemgr.*/slots
+fi

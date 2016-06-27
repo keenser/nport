@@ -1,0 +1,272 @@
+#!/usr/bin/env python
+#
+# vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+#
+# (C) 2015 German Skalaukhov <keenser.sg@gmail.com>
+# gsm modem watchdog
+#
+
+import logging
+import logging.handlers
+import time
+import sys
+import os
+import json
+from multiprocessing.pool import ThreadPool
+try:
+    import Adafruit_BBIO.GPIO as GPIO
+except ImportError:
+    pass
+
+version = "1.1-1"
+servicename = "sim5360"
+
+def getoptions():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="{0} {1}".format(servicename, version))
+
+    parser.add_argument("-v", "--verbose",
+        dest="verbosity",
+        action="count",
+        help="print more diagnostic messages (option can be given multiple times)",
+        default=0
+    )
+
+    parser.add_argument("-l", "--log",
+        dest="logfile",
+        nargs="?",
+        help="log file, default: %(default)s, %(const)s if enabled",
+        const="/var/log/{0}".format(servicename)
+    )
+
+    parser.add_argument("-s", "--syslog",
+        dest="syslog",
+        action="store_true",
+        help="log to syslog (default off)",
+        default=False
+    )
+
+    parser.add_argument("-c", "--console",
+        dest="console",
+        action="store_true",
+        help="log to console (default off)",
+        default=False
+    )
+
+    parser.add_argument("-d","--device",
+        dest="device",
+        nargs="+",
+        help="using device, default: %(default)s",
+        default=["/dev/ttyUSB3"]
+    )
+
+    parser.add_argument("-g","--gpio",
+        dest="gpio",
+        help="power key modem, default: %(default)s",
+        default="P8_45"
+    )
+
+    parser.add_argument("--sleep",
+        dest="sleep",
+        type=float,
+        help="sleep time between HIGH and LOW signals on gpio, default: %(default)s sec",
+        default=0.50
+    )
+
+    parser.add_argument("-j",
+        dest="json",
+        action="store_true",
+        help="Json output format. Default: text format",
+        default=False
+    )
+ 
+    group = parser.add_mutually_exclusive_group(required=True)
+
+    group.add_argument("--poweron",
+        dest="poweron",
+        action="store_true",
+        help="send impulse to power gpio and exit if modem unavailable",
+        default=False
+    )
+
+    group.add_argument("--poweroff",
+        dest="poweroff",
+        action="store_true",
+        help="send impulse to power gpio and exit if modem on",
+        default=False
+    )
+
+    group.add_argument("--status",
+        dest="status",
+        action="store_true",
+        help="get status from devices",
+        default=False
+    )
+
+    return parser.parse_args()
+
+def sendimpulse(gpio, sleep):
+    log = logging.getLogger('sendimpulse')
+    log.info("try to send impulse %f sec to %s", sleep, gpio)
+    try:
+        GPIO.setup(gpio, GPIO.OUT)
+        log.info("send HIGH to %s", gpio)
+        GPIO.output(gpio, GPIO.HIGH)
+        time.sleep(sleep)
+        log.info("send LOW to %s", gpio)
+        GPIO.output(gpio, GPIO.LOW)
+    except NameError:
+        log.error("GPIO library not present")
+
+def devicestatus(device):
+    import serial
+    import base64
+    import re
+    log = logging.getLogger('devicestatus')
+    out = {'device': device}
+    oussd = {}
+    oussd['Beeline'] = {'balance':b'AT+CUSD=1,*102#,15\r\n', 'number':b'AT+CUSD=1,*110*10#,15\r\n'}
+    oussd['MegaFon'] = {'balance':b'AT+CUSD=1,*100#,15\r\n', 'number':b'AT+CUSD=1,*205#,15\r\n'}
+    oussd['MTS'] = {'balance':b'AT+CUSD=1,*100#,15\r\n', 'number':b'AT+CUSD=1,*111*0887#,15\r\n'}
+    try:
+        s = serial.Serial(port=device)
+        s.nonblocking()
+
+        s.setTimeout(0)
+        while s.read(4096):
+            pass
+
+        s.setTimeout(1)
+        s.write(b'AT+COPS=3,1\r\n')
+        count = 0
+        for line in s:
+            log.debug("got response from modem: '%s'", line)
+            if line.decode().startswith('OK'):
+                count += 1
+                break
+
+        if not count:
+            out['error'] = "no modem response received"
+            return
+
+        s.write(b'AT+COPS?\r\n')
+        for line in s:
+            log.debug("got response from modem: '%s'", line)
+            line = line.decode()
+            if line.startswith('+COPS:'):
+                out['operator'] = line[line.find('"')+1:line.rfind('"')]
+                break
+
+        s.write(b'AT+CSQ\r\n')
+        for line in s:
+            log.debug("got response from modem: '%s'", line)
+            line = line.decode()
+            if line.startswith('+CSQ:'):
+                out['dbi'] = float(re.search(r'[\d,.]+', line).group().replace(',','.')) * 2.0 - 113.0
+                break
+
+        s.setTimeout(10)
+        s.write(oussd[out['operator']]['balance'])
+        for line in s:
+            log.debug("got response from modem: '%s'", line)
+            line = line.decode()
+            if line.startswith('+CUSD:'):
+                ussd = base64.b16decode(line[line.find('"')+1:line.rfind('"')]).decode('utf-16-be')
+                out['balance'] = float(re.search(r'[\d,.]+', ussd).group().replace(',','.'))
+                break
+            elif line.startswith('ERROR'):
+                break
+
+        s.write(oussd[out['operator']]['number'])
+        for line in s:
+            log.debug("got response from modem: '%s'", line)
+            line = line.decode()
+            if line.startswith('+CUSD:'):
+                out['number'] = re.search(r'\d+', line).group()
+                break
+            elif line.startswith('ERROR'):
+                break
+
+    except serial.serialutil.SerialException as msg:
+        log.error("can't open device %s: %s", device, msg)
+        out['error'] = str(msg)
+    except KeyError as msg:
+        log.error("can't get sim info %s: %s", device, msg)
+        out['error'] = str(msg)
+    finally:
+        try:
+            log.debug("close modem")
+            gsm.close()
+        except:
+            pass
+    return out
+
+def main():
+    options = getoptions()
+
+    if options.verbosity > 3:
+        options.verbosity = 3
+
+    level = (
+        logging.WARNING,
+        logging.INFO,
+        logging.DEBUG,
+        logging.NOTSET,
+        )[options.verbosity]
+
+    logger = logging.getLogger('')
+    logger.addHandler(logging.NullHandler())
+    logger.setLevel(level)
+    logformat = '%(asctime)s %(levelname)s:%(name)s: %(message)s'
+
+    if options.logfile:
+        filelogger = logging.handlers.WatchedFileHandler(options.logfile)
+        filelogger.setFormatter(logging.Formatter(logformat))
+        logger.addHandler(filelogger)
+
+    if options.syslog:
+        syslogger = logging.handlers.SysLogHandler(address = '/dev/log', facility = logging.handlers.SysLogHandler.LOG_LOCAL1)
+        syslogger.setFormatter(logging.Formatter('%(name)s: %(message)s'))
+        logger.addHandler(syslogger)
+
+    if options.console:
+        conslogger = logging.StreamHandler()
+        conslogger.setFormatter(logging.Formatter(logformat))
+        logger.addHandler(conslogger)
+
+    sys.excepthook = lambda excType, excValue, traceback: logging.getLogger('exception').error("Uncaught exception", exc_info=(excType, excValue, traceback))
+
+    log = logging.getLogger(servicename)
+
+    log.info("starting %s version %s", servicename, version)
+
+    if options.status:
+        p = ThreadPool(4)
+        out = p.map(devicestatus, options.device)
+        if options.json:
+            print(json.dumps(out, indent=4, sort_keys=True))
+        else:
+            for device in out:
+                for out, val in device.items():
+                    print("%s: %s" % (out, str(val)))
+                print('')
+
+    if options.poweroff:
+        log.info("try to poweroff device %s by sending impulse %f sec to %s", options.device[0], options.sleep, options.gpio)
+        try:
+            if os.path.exists(options.device[0]):
+                sendimpulse(options.gpio, options.sleep)
+        except KeyboardInterrupt:
+            pass
+
+    if options.poweron:
+        log.info("try to poweron device %s by sending impulse %f sec to %s", options.device[0], options.sleep, options.gpio)
+        try:
+            if not os.path.exists(options.device[0]):
+                sendimpulse(options.gpio, options.sleep)
+        except KeyboardInterrupt:
+            pass
+
+if __name__ == '__main__':
+    main()

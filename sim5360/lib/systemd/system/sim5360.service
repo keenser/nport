@@ -1,0 +1,7 @@
+[Unit]
+Description=sim5360 modem poweron
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/sim5360
+ExecStart=/usr/bin/sim5360 --poweron $OPTIONS

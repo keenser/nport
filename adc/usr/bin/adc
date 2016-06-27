@@ -1,0 +1,461 @@
+#!/usr/bin/env python
+#
+# vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+#
+# (C) 2015 German Skalaukhov <keenser.sg@gmail.com>
+# BBB ADC inputs statistics collector daemon
+#
+
+import os
+import sys
+import atexit
+import signal
+import logging
+import logging.handlers
+import threading
+import socket
+import time
+import datetime
+import subprocess
+import shlex
+from collections import deque
+import json
+import glob
+try:
+    from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+    from SocketServer import ThreadingMixIn
+    from urlparse import urlparse, parse_qs
+except ImportError:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from socketserver import ThreadingMixIn
+    from urllib.parse import urlparse, parse_qs
+
+version = "1.0-1"
+servicename = "adc"
+servicedesc = "BBB ADC inputs statistics collector daemon"
+
+seq = lambda x: [{'seq':i, 'value':x[i]['value'], 'timestamp':x[i]['timestamp']} for i in range(len(x))]
+
+class ComplexEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, deque):
+            return list(obj)
+        if isinstance(obj, datetime.timedelta):
+            return obj.total_seconds()
+        if isinstance(obj, file):
+            return obj.name
+        return super().default(self, obj)
+
+class HttpHandler(BaseHTTPRequestHandler):
+    def __init__(self, request, client_address, server, data):
+        self.log = logging.getLogger('HttpHandler')
+        self.data = data
+        BaseHTTPRequestHandler.__init__(self, request, client_address, server)
+
+    def log_error(self, format, *args):
+        self.log.error("%s %s",self.client_address[0], format%args)
+
+    def log_message(self, format, *args):
+        self.log.debug("%s %s",self.client_address[0], format%args)
+
+    def do_GET(self):
+        data = ""
+        try:
+            url = urlparse(self.path)
+            query = parse_qs(url.query)
+            if url.path == '/':
+                if not len(query):
+                    data = json.dumps(self.data, cls=ComplexEncoder)
+                else:
+                    for key, val in query.items():
+                        if key == 'datalen':
+                            for ain_key, ain_val in self.data['data'].items():
+                                self.data['data'][ain_key]['data'] = deque(ain_val['data'], maxlen=int(val[0]))
+                            data = "datalen={0}".format(val[0])
+                        elif key == 'period':
+                            self.data['period'] = timedelta(val[0])
+                            data = "period={0}".format(val[0])
+            else:
+                if url.path[0] == '/':
+                    path = url.path[1:]
+                else:
+                    path = url.path
+                if query.get('start'):
+                    start = int(query['start'][0])
+                else:
+                    start = 0
+                if query.get('count'):
+                    end = start + int(query['count'][0])
+                else:
+                    end = None
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+                array = seq(self.data['data'][path]['data'])[start:end]
+                data = json.dumps({'AIN':path,'period':self.data['period'],'start':start,'count':len(array),'timestamp':timestamp,'data':array}, cls=ComplexEncoder)
+        except (KeyError, ValueError) as msg:
+            self.log.error('%s: %s', self.path, msg)
+
+        if data:
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(data.encode("utf-8"))
+        else:
+            self.send_response(403)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+
+class HTTPServerTh(ThreadingMixIn, HTTPServer):
+    pass
+
+class HTTP(threading.Thread):
+    def __init__(self, options, data):
+        self.log = logging.getLogger('HTTP')
+        threading.Thread.__init__(self)
+        self.log.info("starting http server on port %s", options.http)
+        try:
+            host, port = options.http.rsplit(':',1)
+            self.httpd = HTTPServerTh((host, int(port)), lambda request, client_address, server: HttpHandler(request, client_address, server, data))
+        except (socket.error, ValueError) as msg:
+            self.log.error("can't start http server on %s: %s", options.http, msg)
+            sys.exit(1)
+        self.daemon = True
+        self.start()
+
+    def run(self):
+       self.httpd.serve_forever()
+
+    def stop(self):
+        self.httpd.shutdown()
+
+class SimpleCompare:
+    """
+        Simple math compare calss as replace of eval() for security reasons
+    """
+    def __init__(self, cond):
+        self.strcond = ""
+        self.cond(cond)
+
+    def cond(self, cond):
+        self.strcond = cond
+        cond = cond.replace(' ', '')
+        if cond.startswith('>'):
+            self.__call__ = self.__more
+        elif cond.startswith('<'):
+            self.__call__ = self.__less
+        elif cond.startswith('='):
+            self.__call__ = self.__eq
+        self.__num = float(cond[1:])
+
+    def __more(self, num):
+        return num > self.__num
+    def __less(self, num):
+        return num < self.__num
+    def __eq(self, num):
+        return num == self.__num
+
+    def __str__(self):
+        return self.strcond
+
+def getoptions():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="{0} {1}".format(servicedesc, version))
+
+    parser.add_argument("-v", "--verbose",
+        dest="verbosity",
+        action="count",
+        help="print more diagnostic messages (option can be given multiple times)",
+        default=0
+    )
+
+    parser.add_argument("-l", "--log",
+        dest="logfile",
+        nargs="?",
+        help="log file, default: %(default)s, %(const)s if enabled",
+        const="/var/log/{0}".format(servicename)
+    )
+
+    parser.add_argument("-s", "--syslog",
+        dest="syslog",
+        action="store_true",
+        help="log to syslog (default off)",
+        default=False
+    )
+
+    parser.add_argument("-p", "--pid",
+        dest="pid",
+        nargs="?",
+        help="pid file, default: %(default)s, %(const)s if enabled",
+        const="/var/run/{0}.pid".format(servicename)
+    )
+
+    parser.add_argument("-f", "--foreground",
+        dest="foreground",
+        action="store_true",
+        help="stay in foreground (default off)",
+        default=False
+    )
+
+    parser.add_argument("--http",
+        dest="http",
+        help="http listen on IP:PORT, default: %(default)s",
+        default="127.0.0.1:8003"
+    )
+
+    parser.add_argument("--datalen",
+        dest="datalen",
+        type=int,
+        help="data pool length, default: %(default)s",
+        default=3600
+    )
+
+    parser.add_argument("--period",
+        dest="period",
+        help="data read period in NUM[dhms] format, default: %(default)s",
+        default='1s'
+    )
+
+    parser.add_argument("--script",
+        dest="script",
+        help="call custom script if data satisfy compare parameters, default: %(default)s",
+    )
+
+    parser.add_argument("--compare",
+        dest="compare",
+        help="data compare parameters, default: INP %(default)s",
+        default='= 0'
+    )
+
+    return parser.parse_args()
+
+class daemon:
+    """A generic daemon class.
+
+    Usage: subclass the daemon class and override the run() method."""
+
+    def __init__(self, pidfile): self.pidfile = pidfile
+
+    def daemonize(self, secondfork=False):
+        """Deamonize class. UNIX double fork mechanism."""
+
+        try:
+            pid = os.fork()
+            if pid > 0:
+                # exit first parent
+                sys.exit(0)
+        except OSError as err:
+            sys.stderr.write('fork #1 failed: {0}\n'.format(err))
+            sys.exit(1)
+
+        # decouple from parent environment
+        os.chdir('/')
+        os.setsid()
+        os.umask(0)
+
+        # do second fork
+        if secondfork:
+            try:
+                pid = os.fork()
+                if pid > 0:
+
+                    # exit from second parent
+                    sys.exit(0)
+            except OSError as err:
+                sys.stderr.write('fork #2 failed: {0}\n'.format(err))
+                sys.exit(1)
+
+        # write pidfile
+        try:
+            if self.pidfile:
+                pid = str(os.getpid())
+                with open(self.pidfile,'w+') as f:
+                    f.write(pid + '\n')
+                atexit.register(self.delpid)
+        except PermissionError:
+            sys.stderr.write('can not write pidfile %s\n' % self.pidfile)
+            sys.exit(1)
+
+        # redirect standard file descriptors
+        sys.stdout.flush()
+        sys.stderr.flush()
+        si = open(os.devnull, 'r')
+        so = open(os.devnull, 'a+')
+        se = open(os.devnull, 'a+')
+
+        os.dup2(si.fileno(), sys.stdin.fileno())
+        os.dup2(so.fileno(), sys.stdout.fileno())
+        os.dup2(se.fileno(), sys.stderr.fileno())
+
+    def delpid(self):
+        os.remove(self.pidfile)
+
+    def start(self, foreground):
+        """Start the daemon."""
+
+        # Check for a pidfile to see if the daemon already runs
+        try:
+            with open(self.pidfile,'r') as pf:
+                pid = int(pf.read().strip())
+        except (IOError, TypeError, ValueError):
+            pid = None
+
+        if pid:
+            message = "pidfile {0} already exist. " + \
+                    "Daemon already running?\n"
+            sys.stderr.write(message.format(self.pidfile))
+            sys.exit(1)
+
+        # catch TERM
+        signal.signal(signal.SIGTERM, lambda signum, stack_frame: sys.exit(0))
+
+        # Start the daemon
+        if not foreground:
+            self.daemonize()
+
+def timedelta(time_val):
+    if time_val.endswith('ms'):
+        return datetime.timedelta(milliseconds=int(time_val[:-2]))
+    elif time_val.endswith('s'):
+        return datetime.timedelta(seconds=int(time_val[:-1]))
+    elif time_val.endswith('m'):
+        return datetime.timedelta(minutes=int(time_val[:-1]))
+    elif time_val.endswith('h'):
+        return datetime.timedelta(hours=int(time_val[:-1]))
+    elif time_val.endswith('d'):
+        return datetime.timedelta(days=int(time_val[:-1]))
+    else:
+        return datetime.timedelta(seconds=float(time_val))
+
+class ShellProcessor(threading.Thread):
+    def __init__(self):
+        """Setup the object with a logger and a loglevel
+        and start the thread
+        """
+        threading.Thread.__init__(self)
+        self.daemon = False
+        self.log = logging.getLogger('ShellProcessor')
+        self.fdRead, self.fdWrite = os.pipe()
+        self.pipeReader = os.fdopen(self.fdRead)
+        self.start()
+
+    def run(self):
+        """Run the thread, logging everything.
+        """
+        for line in iter(self.pipeReader.readline, ''):
+            self.log.debug(line.strip('\n'))
+        self.pipeReader.close()
+
+    def close(self):
+        """Close the write end of the pipe.
+        """
+        os.close(self.fdWrite)
+
+    def __call__(self, cmd):
+        threading.Thread(target=self.worker, args=(cmd, )).start()
+
+    def worker(self, cmd):
+        self.log.info("exec '%s'", cmd)
+        th = subprocess.Popen(shlex.split(cmd), stdout=self.fdWrite, stderr=self.fdWrite)
+        th.wait()
+        self.log.info("done %d", th.pid)
+
+def main():
+    options = getoptions()
+    dm = daemon(options.pid)
+    dm.start(options.foreground)
+
+    if options.verbosity > 3:
+        options.verbosity = 3
+
+    level = (
+        logging.WARNING,
+        logging.INFO,
+        logging.DEBUG,
+        logging.NOTSET,
+        )[options.verbosity]
+
+    logger = logging.getLogger('')
+    logger.addHandler(logging.NullHandler())
+    logger.setLevel(level)
+    logformat = '%(asctime)s %(levelname)s:%(name)s: %(message)s'
+
+    if options.logfile:
+        filelogger = logging.handlers.WatchedFileHandler(options.logfile)
+        filelogger.setFormatter(logging.Formatter(logformat))
+        logger.addHandler(filelogger)
+
+    if options.syslog:
+        syslogger = logging.handlers.SysLogHandler(address = '/dev/log', facility = logging.handlers.SysLogHandler.LOG_LOCAL3)
+        syslogger.setFormatter(logging.Formatter('%(name)s: %(message)s'))
+        logger.addHandler(syslogger)
+
+    if options.foreground:
+        conslogger = logging.StreamHandler()
+        conslogger.setFormatter(logging.Formatter(logformat))
+        logger.addHandler(conslogger)
+
+    sys.excepthook = lambda excType, excValue, traceback: logging.getLogger('exception').error("Uncaught exception", exc_info=(excType, excValue, traceback))
+
+    log = logging.getLogger(servicename)
+
+    log.info("starting %s version %s", servicename, version)
+
+    compare = SimpleCompare(options.compare)
+
+    ain = {'data':{}, 'period':timedelta(options.period)}
+    for i in range(0,2):
+        ain['data']['AIN{0}'.format(i)] = {'data':deque([],maxlen=options.datalen), 'runscript':False, 'fd':None}
+
+    httpServer = HTTP(options, ain)
+    shell = ShellProcessor()
+
+    try:
+        while True:
+            roundtime = datetime.datetime.now()
+            timestamp = roundtime.strftime("%Y-%m-%d %H:%M:%S.%f")
+            for inp, v in ain['data'].items():
+                data = 0
+                for i in range(1,6):
+                    try:
+                        v['fd'].seek(0)
+                        data = float(v['fd'].read()) / 1800.0
+                        break
+                    except AttributeError:
+                        try:
+                            v['fd'] = open(glob.glob('/sys/devices/ocp.*/helper.*/')[0] + inp, 'r')
+                            log.debug("open %s", v['fd'].name)
+                        except IndexError:
+                            try:
+                                with open(glob.glob('/sys/devices/bone_capemgr.*/slots')[0], 'w+') as f:
+                                    f.write('cape-bone-iio\n')
+                                    log.info("loaded cape-bone-iio")
+                            except (IOError, IndexError):
+                                pass
+                    except (ValueError, TypeError):
+                        pass
+                v['data'].append({'value':data, 'timestamp':timestamp})
+                if options.script:
+                    if compare(data):
+                        if not v['runscript']:
+                            v['runscript'] = True
+                            cmd = "{0} {1}".format(options.script, inp)
+                            log.info("%s: data %f %s starting script '%s'", inp, data, compare, cmd)
+                            try:
+                                shell(cmd)
+                            except OSError as msg:
+                                log.error("execute '%s': %s", cmd, msg)
+                    elif v['runscript']:
+                        log.info("%s: data %f not %s now", inp, data, compare)
+                        v['runscript'] = False
+
+            sleeptime = ain['period'] + roundtime - datetime.datetime.now()
+            time.sleep(sleeptime.total_seconds())
+
+    except KeyboardInterrupt:
+        log.info('stop')
+    finally:
+        shell.close()
+        httpServer.stop()
+
+if __name__ == '__main__':
+    main()

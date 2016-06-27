@@ -1,0 +1,11 @@
+[Unit]
+DefaultDependencies=no
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/sim5360
+ExecStart=/usr/bin/sim5360 --poweroff $OPTIONS_SHUTDOWN
+
+[Install]
+WantedBy=halt.target poweroff.target

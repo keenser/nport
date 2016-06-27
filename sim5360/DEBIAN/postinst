@@ -1,0 +1,2 @@
+systemctl enable sim5360.timer
+systemctl enable sim5360_shutdown.service

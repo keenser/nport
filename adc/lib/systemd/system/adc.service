@@ -1,0 +1,12 @@
+[Unit]
+Description=BBB ADC inputs statistics collector daemon
+
+[Service]
+Type=forking
+Restart=on-failure
+PIDFile=/var/run/adc.pid
+EnvironmentFile=-/etc/default/adc
+ExecStart=/usr/bin/adc -p $OPTIONS
+
+[Install]
+WantedBy=multi-user.target

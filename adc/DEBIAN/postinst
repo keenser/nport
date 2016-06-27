@@ -1,0 +1,3 @@
+systemctl --system daemon-reload
+systemctl enable adc.service
+systemctl start adc.service

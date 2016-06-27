@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# input params:
+#   $1 - add
+#   $2 - KERNEL device name
+#   $3 - DEVPATH
+#   $4 - W1_FID
+#   $5 - W1_SLAVE_ID
+#
+#   $1 - remove
+#   $2 - KERNEL device name
+# example:
+# add 81-038168015d81 /devices/w1_bus_master1/81-038168015d81 81 000000000000038168015D81
+# remove 81-038168015d81
+
+logger -p local0.info "one-wire event for: $*"
+
+case "$1" in
+  add)
+        ;;
+  remove)
+        ;;
+esac

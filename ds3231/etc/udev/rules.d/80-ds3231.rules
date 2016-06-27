@@ -1,0 +1,3 @@
+KERNEL=="i2c-1", SUBSYSTEM=="i2c-dev", ACTION=="add", PROGRAM="/bin/sh -c 'echo ds3231 0x68 > /sys/bus/i2c/devices/i2c-1/new_device'"
+KERNEL=="i2c-1", SUBSYSTEM=="i2c-dev", ACTION=="remove", PROGRAM="/bin/sh -c 'echo 0x68 > /sys/bus/i2c/devices/i2c-1/delete_device'"
+KERNEL=="rtc1", SUBSYSTEM=="rtc", ACTION=="add", RUN+="/lib/udev/hwclock-set $root/$name", SYMLINK+="rtc"

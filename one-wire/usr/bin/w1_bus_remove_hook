@@ -1,0 +1,266 @@
+#!/usr/bin/env python
+#
+# vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+#
+# (C) 2015 German Skalaukhov <keenser.sg@gmail.com>
+#
+
+import logging
+import logging.handlers
+import time
+
+version = "1.0-1"
+servicename = "w1_bus_remove_hook"
+servicedesc = "one wire device remove hook"
+
+def getoptions():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="{0} {1}".format(servicedesc, version))
+
+    parser.add_argument("-v", "--verbose",
+        dest="verbosity",
+        action="count",
+        help="print more diagnostic messages (option can be given multiple times)",
+        default=0
+    )
+
+    parser.add_argument("-l", "--log",
+        dest="logfile",
+        nargs="?",
+        help="log file, default: %(default)s, %(const)s if enabled",
+        const="/var/log/{0}".format(servicename)
+    )
+
+    parser.add_argument("-s", "--syslog",
+        dest="syslog",
+        action="store_true",
+        help="log to syslog (default off)",
+        default=False
+    )
+
+    parser.add_argument("-p", "--pid",
+        dest="pid",
+        nargs="?",
+        help="pid file, default: %(default)s, %(const)s if enabled",
+        const="/var/run/{0}.pid".format(servicename)
+    )
+
+    parser.add_argument("-f", "--foreground",
+        dest="foreground",
+        action="store_true",
+        help="stay in foreground (default off)",
+        default=False
+    )
+
+    parser.add_argument("--script",
+        dest="script",
+        help="execute script on one-wire device removeal, default: %(default)s W1_ID",
+        default="/etc/one-wire remove"
+    )
+
+    return parser.parse_args()
+
+import os
+import sys
+import atexit
+import signal
+class daemon:
+    """A generic daemon class.
+
+    Usage: subclass the daemon class and override the run() method."""
+
+    def __init__(self, pidfile): self.pidfile = pidfile
+
+    def daemonize(self, secondfork=False):
+        """Deamonize class. UNIX double fork mechanism."""
+
+        try:
+            pid = os.fork()
+            if pid > 0:
+                # exit first parent
+                sys.exit(0)
+        except OSError as err:
+            sys.stderr.write('fork #1 failed: {0}\n'.format(err))
+            sys.exit(1)
+
+        # decouple from parent environment
+        os.chdir('/')
+        os.setsid()
+        os.umask(0)
+
+        # do second fork
+        if secondfork:
+            try:
+                pid = os.fork()
+                if pid > 0:
+
+                    # exit from second parent
+                    sys.exit(0)
+            except OSError as err:
+                sys.stderr.write('fork #2 failed: {0}\n'.format(err))
+                sys.exit(1)
+
+        # write pidfile
+        try:
+            if self.pidfile:
+                pid = str(os.getpid())
+                with open(self.pidfile,'w+') as f:
+                    f.write(pid + '\n')
+                atexit.register(self.delpid)
+        except PermissionError:
+            sys.stderr.write('can not write pidfile %s\n' % self.pidfile)
+            sys.exit(1)
+
+        # redirect standard file descriptors
+        sys.stdout.flush()
+        sys.stderr.flush()
+        si = open(os.devnull, 'r')
+        so = open(os.devnull, 'a+')
+        se = open(os.devnull, 'a+')
+
+        os.dup2(si.fileno(), sys.stdin.fileno())
+        os.dup2(so.fileno(), sys.stdout.fileno())
+        os.dup2(se.fileno(), sys.stderr.fileno())
+
+    def delpid(self):
+        os.remove(self.pidfile)
+
+    def start(self, foreground):
+        """Start the daemon."""
+
+        # Check for a pidfile to see if the daemon already runs
+        try:
+            with open(self.pidfile,'r') as pf:
+                pid = int(pf.read().strip())
+        except (IOError, TypeError, ValueError):
+            pid = None
+
+        if pid:
+            message = "pidfile {0} already exist. " + \
+                    "Daemon already running?\n"
+            sys.stderr.write(message.format(self.pidfile))
+            sys.exit(1)
+
+        # catch TERM
+        signal.signal(signal.SIGTERM, lambda signum, stack_frame: sys.exit(0))
+
+        # Start the daemon
+        if not foreground:
+            self.daemonize()
+
+import os
+import shlex
+import threading
+import subprocess
+class ShellProcessor(threading.Thread):
+    def __init__(self):
+        """Setup the object with a logger and a loglevel
+        and start the thread
+        """
+        threading.Thread.__init__(self)
+        self.daemon = False
+        self.log = logging.getLogger('ShellProcessor')
+        self.fdRead, self.fdWrite = os.pipe()
+        self.pipeReader = os.fdopen(self.fdRead)
+        self.start()
+
+    def run(self):
+        """Run the thread, logging everything.
+        """
+        for line in iter(self.pipeReader.readline, ''):
+            self.log.debug(line.strip('\n'))
+        self.pipeReader.close()
+
+    def close(self):
+        """Close the write end of the pipe.
+        """
+        os.close(self.fdWrite)
+
+    def __call__(self, cmd):
+        threading.Thread(target=self.worker, args=(cmd, )).start()
+
+    def worker(self, cmd):
+        self.log.info("exec '%s'", cmd)
+        try:
+            th = subprocess.Popen(shlex.split(cmd), stdout=self.fdWrite, stderr=self.fdWrite)
+            th.wait()
+            self.log.debug("done %d", th.pid)
+        except (OSError, KeyError, IndexError) as msg:
+            self.log.error("ERROR: %s", msg)
+
+FileNotFoundError = getattr(__builtins__,'FileNotFoundError', IOError)
+
+def main():
+    options = getoptions()
+    dm = daemon(options.pid)
+    dm.start(options.foreground)
+
+    if options.verbosity > 3:
+        options.verbosity = 3
+
+    level = (
+        logging.WARNING,
+        logging.INFO,
+        logging.DEBUG,
+        logging.NOTSET,
+        )[options.verbosity]
+
+    logger = logging.getLogger('')
+    logger.addHandler(logging.NullHandler())
+    logger.setLevel(level)
+    logformat = '%(asctime)s %(levelname)s:%(name)s: %(message)s'
+
+    if options.logfile:
+        filelogger = logging.handlers.WatchedFileHandler(options.logfile)
+        filelogger.setFormatter(logging.Formatter(logformat))
+        logger.addHandler(filelogger)
+
+    if options.syslog:
+        syslogger = logging.handlers.SysLogHandler(address = '/dev/log', facility = logging.handlers.SysLogHandler.LOG_LOCAL6)
+        syslogger.setFormatter(logging.Formatter('%(name)s: %(message)s'))
+        logger.addHandler(syslogger)
+
+    if options.foreground:
+        conslogger = logging.StreamHandler()
+        conslogger.setFormatter(logging.Formatter(logformat))
+        logger.addHandler(conslogger)
+
+    sys.excepthook = lambda excType, excValue, traceback: logging.getLogger('exception').error("Uncaught exception", exc_info=(excType, excValue, traceback))
+
+    log = logging.getLogger(servicename)
+
+    log.info("starting %s version %s", servicename, version)
+
+    shell = ShellProcessor()
+
+    fd = None
+    devices = set()
+    try:
+        while True:
+            try:
+                fd.seek(0)
+                devicelist = set(fd.read().splitlines())
+                devicelist.discard('not found.')
+                log.log(1,"%s %s", str(devices), str(devicelist))
+                for removed in devices.difference(devicelist):
+                    log.info("removed: %s", removed)
+                    shell("{0} {1}".format(options.script, removed))
+                devices = devicelist
+                if len(devices) == 0:
+                    break
+            except (ValueError, AttributeError):
+                fd = open("/sys/devices/w1_bus_master1/w1_master_slaves", "r")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log.info('stop')
+    except FileNotFoundError as msg:
+        log.error("ERROR: %s", msg)
+    finally:
+        if fd:
+            fd.close()
+        shell.close()
+        log.info('exit')
+
+if __name__ == '__main__':
+    main()

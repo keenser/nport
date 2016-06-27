@@ -1,0 +1,13 @@
+#!/bin/bash
+#
+# input params:
+#   $1 - ups|ac 
+
+case "$1" in
+  ups)
+	shutdown --halt +3
+	;;
+  ac)
+	shutdown -c
+	;;
+esac

@@ -1,0 +1,8 @@
+Package: one-wire
+Version: 1.0-1
+Section: utils
+Priority: optional
+Architecture: all
+Depends: udev
+Maintainer: German Skalaukhov <keenser.sg@gmail.com>
+Description: one-wire configuration

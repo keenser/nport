@@ -1,0 +1,76 @@
+#!/usr/bin/env python
+#
+# vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
+#
+
+import smbus
+import json
+
+version = "1.0-0"
+servicename = "countout"
+servicedesc = "Counter output manipulation tool"
+
+def getoptions():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="{0} {1}".format(servicedesc, version),
+    )
+
+    parser.add_argument("-r",
+        dest="read",
+        nargs="?",
+        type=int,
+        choices=[1,2],
+        help="Read counter output data. Use counter number as argument. By default read from all outputs",
+        const=0
+    )
+
+    parser.add_argument("-c",
+        dest="clear",
+        action="store_true",
+        help="Clear counters",
+        default=False
+    )
+
+    parser.add_argument("-j",
+        dest="json",
+        action="store_true",
+        help="Json output format. Default: text format",
+        default=False
+    )
+
+    return parser.parse_args()
+
+def main():
+    options = getoptions()
+    bus = smbus.SMBus(1)
+    out = {}
+    if not options.read is None:
+        try:
+            data = []
+            data.append(bus.read_byte_data(0x3, 0x0))
+            data.append(bus.read_byte_data(0x3, 0x1))
+            data.append(bus.read_byte_data(0x3, 0x2))
+            data.append(bus.read_byte_data(0x3, 0x3))
+            if options.read == 0 or options.read == 1:
+                out['OUT1'] = (data[1]<<8) + data[0]
+            if options.read == 0 or options.read == 2:
+                out['OUT2'] = (data[3]<<8) + data[2]
+        except:
+            out['read'] = 'error'
+
+    if options.clear:
+        try:
+            data = bus.read_byte_data(0x3,0xFF)
+            out['clear'] = 'done'
+        except:
+            out['clear'] = 'error'
+
+    if options.json:
+        print(json.dumps(out, indent=4, sort_keys=True))
+    else:
+        for out, val in out.items():
+            print("%s: %s" % (out, str(val)))
+
+if __name__ == '__main__':
+    main()

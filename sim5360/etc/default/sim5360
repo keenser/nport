@@ -1,0 +1,2 @@
+OPTIONS="-vvv -s"
+OPTIONS_SHUTDOWN="--sleep 1 -vvv -s"

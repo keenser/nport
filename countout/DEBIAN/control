@@ -1,0 +1,8 @@
+Package: countout
+Version: 1.0-0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python, python-smbus
+Maintainer: German Skalaukhov <keenser.sg@gmail.com>
+Description: Counter output manipulation tool
